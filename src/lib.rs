@@ -3,9 +3,8 @@
 use std::fmt;
 
 use minijinja::value::{from_args, Kwargs, Object, Value};
-use minijinja::{Environment, Error, State};
+use minijinja::{Error, State};
 
-use vaultrs::auth::approle::role::{self, secret};
 use vaultrs::client::{VaultClient, VaultClientSettingsBuilderError};
 use vaultrs::kv2;
 
@@ -44,7 +43,12 @@ impl Object for MinijinjaVaultClient {
 impl MinijinjaVaultClient {
     pub fn list(&self, args: &[Value]) -> Result<Value, Error> {
         let (mount, path): (&str, &str) = from_args(args)?;
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = tokio::runtime::Runtime::new().map_err(|e| {
+            Error::new(
+                minijinja::ErrorKind::WriteFailure,
+                format!("failed to create runtime: {}", e),
+            )
+        })?;
         let secret = rt
             .block_on(kv2::list(&self.0, mount, path))
             .expect("list operation failed");
@@ -52,34 +56,33 @@ impl MinijinjaVaultClient {
     }
 
     pub fn get(&self, args: &[Value]) -> Result<Value, Error> {
-        let (mount, path, key): (&str, &str, &str) = from_args(args)?;
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mount, path): (&str, &str) = from_args(args)?;
+        let rt = tokio::runtime::Runtime::new().map_err(|e| {
+            Error::new(
+                minijinja::ErrorKind::WriteFailure,
+                format!("failed to create runtime: {}", e),
+            )
+        })?;
         let secret = rt
-            .block_on(kv2::read::<serde_json::Value>(&self.0, mount, path))
+            .block_on(kv2::read::<Value>(&self.0, mount, path))
             .expect("Failed to read secret");
-        Ok(Value::from_safe_string(
-            secret.get(key).expect("key does not exist").to_string(),
-        ))
+        Ok(secret)
     }
+}
+
+fn get_value(kwargs: &Kwargs, key: &str, env_var: &str) -> Result<String, Error> {
+    let value: Option<&str> = kwargs.get(key)?;
+    Ok(value.map(|s| s.to_string()).unwrap_or_else(|| {
+        std::env::var(env_var).unwrap_or_else(|_| panic!("{} not set", env_var))
+    }))
 }
 
 pub fn make_vault_client(_state: &State, args: Vec<Value>) -> Result<Value, Error> {
     let (_args, kwargs): (&[Value], Kwargs) = from_args(&args)?;
 
-    let addr: Option<&str> = kwargs.get("address")?;
-    let addr = addr
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| std::env::var("VAULT_ADDR").expect("VAULT_ADDR not set"));
-
-    let role_id: Option<&str> = kwargs.get("role_id")?;
-    let role_id = role_id
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| std::env::var("VAULT_ROLE_ID").expect("VAULT_ROLE_ID not set"));
-
-    let secret_id: Option<&str> = kwargs.get("secret_id")?;
-    let secret_id = secret_id
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| std::env::var("VAULT_SECRET_ID").expect("VAULT_SECRET_ID not set"));
+    let addr = get_value(&kwargs, "address", "VAULT_ADDR")?;
+    let role_id = get_value(&kwargs, "role_id", "VAULT_ROLE_ID")?;
+    let secret_id = get_value(&kwargs, "secret_id", "VAULT_SECRET_ID")?;
 
     let verify: Option<bool> = kwargs.get("verify")?;
     let verify = verify.unwrap_or_else(|| {
@@ -103,7 +106,12 @@ pub fn make_vault_client(_state: &State, args: Vec<Value>) -> Result<Value, Erro
         secret_id: secret_id.to_string(),
     };
 
-    let rt = tokio::runtime::Runtime::new().expect("failed to create runtime");
+    let rt = tokio::runtime::Runtime::new().map_err(|e| {
+        Error::new(
+            minijinja::ErrorKind::WriteFailure,
+            format!("failed to create runtime: {}", e),
+        )
+    })?;
     let mut client = VaultClient::new(the_settings).expect("failed to create client");
 
     rt.block_on(client.login("approle", &login))
