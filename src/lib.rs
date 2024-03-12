@@ -10,7 +10,7 @@ use vaultrs::kv2;
 use vaultrs_login::engines::approle::AppRoleLogin;
 use vaultrs_login::LoginClient;
 
-struct MinijinjaVaultClient(VaultClient);
+pub struct MinijinjaVaultClient(VaultClient);
 
 impl fmt::Display for MinijinjaVaultClient {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -40,7 +40,7 @@ impl Object for MinijinjaVaultClient {
 }
 
 impl MinijinjaVaultClient {
-    fn list(&self, args: &[Value]) -> Result<Value, Error> {
+    pub fn list(&self, args: &[Value]) -> Result<Value, Error> {
         let (mount, path): (&str, &str) = from_args(args)?;
         let rt = tokio::runtime::Runtime::new().unwrap();
         let secret = rt
@@ -49,7 +49,7 @@ impl MinijinjaVaultClient {
         Ok(Value::from_iter(secret))
     }
 
-    fn get(&self, args: &[Value]) -> Result<Value, Error> {
+    pub fn get(&self, args: &[Value]) -> Result<Value, Error> {
         let (mount, path, key): (&str, &str, &str) = from_args(args)?;
         let rt = tokio::runtime::Runtime::new().unwrap();
         let secret = rt
@@ -61,7 +61,7 @@ impl MinijinjaVaultClient {
     }
 }
 
-fn make_vault_client(_state: &State, args: Vec<Value>) -> Result<Value, Error> {
+pub fn make_vault_client(_state: &State, args: Vec<Value>) -> Result<Value, Error> {
     let client = match args.as_slice() {
         [addr, role_id, secret_id] => {
             let mut settings = vaultrs::client::VaultClientSettingsBuilder::default();
