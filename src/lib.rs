@@ -98,14 +98,4 @@ pub fn make_vault_client(_state: &State, args: Vec<Value>) -> Result<Value, Erro
     Ok(Value::from_object(MinijinjaVaultClient(client)))
 }
 
-fn main() {
-    let mut env = Environment::new();
-    // disable autoescaping
-    env.set_auto_escape_callback(|_| minijinja::AutoEscape::None);
-    env.add_function("make_vault_client", make_vault_client);
-    env.add_template("template.html", include_str!("template.html"))
-        .unwrap();
 
-    let tmpl = env.get_template("template.html").unwrap();
-    println!("{}", tmpl.render(()).unwrap());
-}
