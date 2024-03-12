@@ -64,7 +64,7 @@ impl MinijinjaVaultClient {
 }
 
 pub fn make_vault_client(_state: &State, args: Vec<Value>) -> Result<Value, Error> {
-    let (_, kwargs): (&[Value], Kwargs) = from_args(&args)?;
+    let (_args, kwargs): (&[Value], Kwargs) = from_args(&args)?;
 
     let addr: Option<&str> = kwargs.get("address")?;
     let addr = addr
