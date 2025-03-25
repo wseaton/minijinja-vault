@@ -42,6 +42,13 @@ impl MinijinjaVaultClient {
             runtime,
         })
     }
+
+    pub fn with_runtime(client: VaultClient, runtime: Runtime) -> Self {
+        MinijinjaVaultClient {
+            vault: client,
+            runtime,
+        }
+    }
 }
 
 impl fmt::Display for MinijinjaVaultClient {
@@ -98,7 +105,8 @@ impl MinijinjaVaultClient {
 fn get_value(kwargs: &Kwargs, key: &str, env_var: &str) -> Result<String, Error> {
     let value: Option<&str> = kwargs.get(key)?;
     Ok(value.map(|s| s.to_string()).unwrap_or_else(|| {
-        std::env::var(env_var).unwrap_or_else(|_| panic!("{} not set", env_var))
+        std::env::var(env_var)
+            .unwrap_or_else(|_| panic!("Fallback ENV var {} not set", env_var.to_ascii_uppercase()))
     }))
 }
 
@@ -160,9 +168,7 @@ pub fn make_vault_client(options: Kwargs) -> Result<Value, Error> {
     };
 
     let addr = get_value(&options, "address", "VAULT_ADDR")?;
-
-    let verify: Option<bool> = options.get("verify")?;
-    let verify = verify.unwrap_or_else(|| {
+    let verify = options.get::<Option<bool>>("verify")?.unwrap_or_else(|| {
         std::env::var("VAULT_SKIP_VERIFY")
             .map(|s| s == "false")
             .unwrap_or(true)
