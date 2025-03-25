@@ -1,17 +1,33 @@
 #![allow(clippy::let_unit_value)]
 
-use std::fmt;
+use std::sync::Arc;
+use std::{default, fmt, option};
 
 use minijinja::value::{from_args, Kwargs, Object, Value};
 use minijinja::{Error, State};
 
-use vaultrs::client::{VaultClient, VaultClientSettingsBuilderError};
+use tokio::runtime::Runtime;
+use tracing::{debug, error, info};
+use vaultrs::client::{VaultClient, VaultClientSettingsBuilder, VaultClientSettingsBuilderError};
 use vaultrs::kv2;
 
-use vaultrs_login::engines::approle::AppRoleLogin;
+use vaultrs_login::engines::{approle::AppRoleLogin, oidc::OIDCLogin};
+use vaultrs_login::method::{default_mount, Method};
 use vaultrs_login::LoginClient;
 
+pub enum VaultLogin {
+    AppRole(AppRoleLogin),
+    OIDC(OIDCLogin),
+}
+
 pub struct MinijinjaVaultClient(VaultClient);
+
+impl MinijinjaVaultClient {
+    // helper function to create a new instance of the client in rust code
+    pub fn new(client: VaultClient) -> Self {
+        MinijinjaVaultClient(client)
+    }
+}
 
 impl fmt::Display for MinijinjaVaultClient {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -26,9 +42,13 @@ impl fmt::Debug for MinijinjaVaultClient {
 }
 
 impl Object for MinijinjaVaultClient {
-    fn call_method(&self, _state: &State, name: &str, args: &[Value]) -> Result<Value, Error> {
+    fn call_method(
+        self: &Arc<Self>,
+        state: &State,
+        name: &str,
+        args: &[Value],
+    ) -> Result<Value, Error> {
         // use the client on self to get the secret from a kv2 endpoint
-
         match name {
             "list" => self.list(args),
             "get" => self.get(args),
@@ -77,36 +97,81 @@ fn get_value(kwargs: &Kwargs, key: &str, env_var: &str) -> Result<String, Error>
     }))
 }
 
-pub fn make_vault_client(_state: &State, args: Vec<Value>) -> Result<Value, Error> {
-    let (_args, kwargs): (&[Value], Kwargs) = from_args(&args)?;
+/// This function creates a new instance of the vault client from inside of the template
+pub fn make_vault_client(options: Kwargs) -> Result<Value, Error> {
+    debug!("{:#?}", &options);
+    let (mount, login) = match options.get("login") {
+        Ok(Some("oidc")) => {
+            let mount = default_mount(&Method::OIDC);
 
-    let addr = get_value(&kwargs, "address", "VAULT_ADDR")?;
-    let role_id = get_value(&kwargs, "role_id", "VAULT_ROLE_ID")?;
-    let secret_id = get_value(&kwargs, "secret_id", "VAULT_SECRET_ID")?;
+            // Parse OIDC port from kwargs or environment variable
+            let port = std::env::var("VAULT_OIDC_PORT")
+                .unwrap_or("8250".to_string())
+                .parse::<u16>()
+                .map_err(|e| {
+                    Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        format!("failed to parse port: {}", e),
+                    )
+                })?;
 
-    let verify: Option<bool> = kwargs.get("verify")?;
+            // Get OIDC role or use empty string as default
+            let role = Some(std::env::var("VAULT_OIDC_ROLE").unwrap_or_else(|_| "".to_string()));
+
+            (
+                mount,
+                VaultLogin::OIDC(OIDCLogin {
+                    port: Some(port),
+                    role,
+                }),
+            )
+        }
+        Ok(Some("app_role")) => {
+            let mount = default_mount(&Method::APPROLE);
+            (
+                mount,
+                VaultLogin::AppRole(AppRoleLogin {
+                    role_id: get_value(&options, "role_id", "VAULT_ROLE_ID")?,
+                    secret_id: get_value(&options, "secret_id", "VAULT_SECRET_ID")?,
+                }),
+            )
+        }
+        Ok(Some(other)) => {
+            return Err(Error::new(
+                minijinja::ErrorKind::InvalidOperation,
+                format!("unknown login method: {}", other),
+            ))
+        }
+        Ok(None) => {
+            return Err(Error::new(
+                minijinja::ErrorKind::InvalidOperation,
+                "unknown login method: [EMPTY]".to_string(),
+            ))
+        }
+        Err(e) => {
+            return Err(Error::new(
+                minijinja::ErrorKind::InvalidOperation,
+                format!("failed to generate login: {e}",),
+            ))
+        }
+    };
+
+    let addr = get_value(&options, "address", "VAULT_ADDR")?;
+
+    let verify: Option<bool> = options.get("verify")?;
     let verify = verify.unwrap_or_else(|| {
         std::env::var("VAULT_SKIP_VERIFY")
             .map(|s| s == "false")
             .unwrap_or(true)
     });
 
-    let mut settings = vaultrs::client::VaultClientSettingsBuilder::default();
+    let mut settings = VaultClientSettingsBuilder::default();
     settings.address(addr);
     settings.verify(verify);
 
-    let the_settings = settings
-        .build()
-        .map_err(VaultClientSettingsBuilderError::from)
-        .expect("failed to build settings");
+    let the_settings = settings.build().expect("failed to build settings");
 
-    // Use one of the login flows to obtain a token for the client
-    let login = AppRoleLogin {
-        role_id: role_id.to_string(),
-        secret_id: secret_id.to_string(),
-    };
-
-    let rt = tokio::runtime::Runtime::new().map_err(|e| {
+    let rt = Runtime::new().map_err(|e| {
         Error::new(
             minijinja::ErrorKind::WriteFailure,
             format!("failed to create runtime: {}", e),
@@ -114,8 +179,29 @@ pub fn make_vault_client(_state: &State, args: Vec<Value>) -> Result<Value, Erro
     })?;
     let mut client = VaultClient::new(the_settings).expect("failed to create client");
 
-    rt.block_on(client.login("approle", &login))
-        .expect("fauled to login");
+    match login {
+        VaultLogin::AppRole(login) => rt
+            .block_on(client.login(&mount, &login))
+            .expect("failed to login"),
+        VaultLogin::OIDC(login) => {
+            // Login with OIDC in a blocking manner
+            info!("Logging in with OIDC");
+            let cb = rt
+                .block_on(client.login_multi("oidc", login))
+                .expect("failed to get OIDC login callback");
 
-    Ok(Value::from_object(MinijinjaVaultClient(client)))
+            tracing::debug!("OIDC callback: {:?}", cb);
+            if webbrowser::open(cb.url.as_str()).is_err() {
+                error!("Failed to open browser, please navigate to: {}", cb.url);
+            }
+
+            info!("Waiting for OIDC callback...");
+            rt.block_on(client.login_multi_callback("oidc", cb))
+                .expect("failed to complete OIDC callback");
+
+            info!("OIDC login completed successfully");
+        }
+    }
+
+    Ok(Value::from_object(MinijinjaVaultClient::new(client)))
 }
