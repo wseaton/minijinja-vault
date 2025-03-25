@@ -1,14 +1,14 @@
 #![allow(clippy::let_unit_value)]
 
 use std::sync::Arc;
-use std::{default, fmt, option};
+use std::{fmt, io};
 
 use minijinja::value::{from_args, Kwargs, Object, Value};
 use minijinja::{Error, State};
 
-use tokio::runtime::Runtime;
+use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 use tracing::{debug, error, info};
-use vaultrs::client::{VaultClient, VaultClientSettingsBuilder, VaultClientSettingsBuilderError};
+use vaultrs::client::{VaultClient, VaultClientSettingsBuilder};
 use vaultrs::kv2;
 
 use vaultrs_login::engines::{approle::AppRoleLogin, oidc::OIDCLogin};
@@ -20,12 +20,27 @@ pub enum VaultLogin {
     OIDC(OIDCLogin),
 }
 
-pub struct MinijinjaVaultClient(VaultClient);
+pub struct MinijinjaVaultClient {
+    pub vault: VaultClient,
+    runtime: Runtime,
+}
 
 impl MinijinjaVaultClient {
     // helper function to create a new instance of the client in rust code
     pub fn new(client: VaultClient) -> Self {
-        MinijinjaVaultClient(client)
+        let runtime = get_runtime().expect("failed to create runtime");
+        MinijinjaVaultClient {
+            vault: client,
+            runtime,
+        }
+    }
+
+    pub fn try_new(client: VaultClient) -> Result<Self, io::Error> {
+        let runtime = get_runtime()?;
+        Ok(MinijinjaVaultClient {
+            vault: client,
+            runtime,
+        })
     }
 }
 
@@ -44,7 +59,7 @@ impl fmt::Debug for MinijinjaVaultClient {
 impl Object for MinijinjaVaultClient {
     fn call_method(
         self: &Arc<Self>,
-        state: &State,
+        _state: &State,
         name: &str,
         args: &[Value],
     ) -> Result<Value, Error> {
@@ -63,28 +78,18 @@ impl Object for MinijinjaVaultClient {
 impl MinijinjaVaultClient {
     pub fn list(&self, args: &[Value]) -> Result<Value, Error> {
         let (mount, path): (&str, &str) = from_args(args)?;
-        let rt = tokio::runtime::Runtime::new().map_err(|e| {
-            Error::new(
-                minijinja::ErrorKind::WriteFailure,
-                format!("failed to create runtime: {}", e),
-            )
-        })?;
-        let secret = rt
-            .block_on(kv2::list(&self.0, mount, path))
+        let secret = self
+            .runtime
+            .block_on(kv2::list(&self.vault, mount, path))
             .expect("list operation failed");
         Ok(Value::from_iter(secret))
     }
 
     pub fn get(&self, args: &[Value]) -> Result<Value, Error> {
         let (mount, path): (&str, &str) = from_args(args)?;
-        let rt = tokio::runtime::Runtime::new().map_err(|e| {
-            Error::new(
-                minijinja::ErrorKind::WriteFailure,
-                format!("failed to create runtime: {}", e),
-            )
-        })?;
-        let secret = rt
-            .block_on(kv2::read::<Value>(&self.0, mount, path))
+        let secret = self
+            .runtime
+            .block_on(kv2::read::<Value>(&self.vault, mount, path))
             .expect("Failed to read secret");
         Ok(secret)
     }
@@ -99,11 +104,10 @@ fn get_value(kwargs: &Kwargs, key: &str, env_var: &str) -> Result<String, Error>
 
 /// This function creates a new instance of the vault client from inside of the template
 pub fn make_vault_client(options: Kwargs) -> Result<Value, Error> {
-    debug!("{:#?}", &options);
+    debug!("kwargs: {:#?}", &options);
     let (mount, login) = match options.get("login") {
         Ok(Some("oidc")) => {
             let mount = default_mount(&Method::OIDC);
-
             // Parse OIDC port from kwargs or environment variable
             let port = std::env::var("VAULT_OIDC_PORT")
                 .unwrap_or("8250".to_string())
@@ -117,7 +121,6 @@ pub fn make_vault_client(options: Kwargs) -> Result<Value, Error> {
 
             // Get OIDC role or use empty string as default
             let role = Some(std::env::var("VAULT_OIDC_ROLE").unwrap_or_else(|_| "".to_string()));
-
             (
                 mount,
                 VaultLogin::OIDC(OIDCLogin {
@@ -171,7 +174,7 @@ pub fn make_vault_client(options: Kwargs) -> Result<Value, Error> {
 
     let the_settings = settings.build().expect("failed to build settings");
 
-    let rt = Runtime::new().map_err(|e| {
+    let rt = get_runtime().map_err(|e| {
         Error::new(
             minijinja::ErrorKind::WriteFailure,
             format!("failed to create runtime: {}", e),
@@ -204,4 +207,8 @@ pub fn make_vault_client(options: Kwargs) -> Result<Value, Error> {
     }
 
     Ok(Value::from_object(MinijinjaVaultClient::new(client)))
+}
+
+fn get_runtime() -> io::Result<Runtime> {
+    RuntimeBuilder::new_current_thread().enable_all().build()
 }

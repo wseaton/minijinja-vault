@@ -1,10 +1,8 @@
-use std::sync::Arc;
-
 use minijinja::{context, value::Kwargs, Environment, Value};
-use minijinja_vault::{make_vault_client, MinijinjaVaultClient};
+use minijinja_vault::make_vault_client;
 
 use dotenv::dotenv;
-use tracing::{error, info};
+use tracing::error;
 
 fn main() {
     dotenv().ok();
