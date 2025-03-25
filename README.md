@@ -1,19 +1,24 @@
-# MiniJinja Vault
+# MiniJinja Vault Plugin
 
-A Rust library that integrates MiniJinja templating with HashiCorp Vault.
+A Rust library that integrates MiniJinja templating with HashiCorp Vault at render time.
+
+Currently supported auth methods:
+
+- OIDC
+- AppRole
 
 ## Structure
 
 This workspace contains:
 
 - `minijinja-vault`: The core library
-- `minijinja-vault-example`: Example application showing usage
+- `examples`: Example applications showing usage
 
 ## Running the Example
 
 ```
-cd minijinja-vault-example
+cd examples/cli
 cargo run
 ```
 
-Make sure to set the required environment variables or create a `.env` file.
+Make sure to set the required environment variables or create a `.env` file. The example assumes you have a running Vault instance to connect to.
